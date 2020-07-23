@@ -4,6 +4,7 @@
 # https://www.elastic.co/guide/en/kibana/current/saved-objects-api-export.html
 # https://www.elastic.co/guide/en/kibana/current/saved-objects-api-import.html
 
+import json
 import sys
 import argparse
 import requests
@@ -43,7 +44,7 @@ def backup(kibana_url, space_id, user, password, backup_dir):
     return '\n'.join(saved_objects.values())
 
 
-def restore(kibana_url, space_id, user, password, text):
+def restore(kibana_url, space_id, user, password, text, resolve_conflicts):
     """Restore given newline-delimitered json containing saved objects to Kibana"""
 
     if len(space_id):
@@ -58,8 +59,27 @@ def restore(kibana_url, space_id, user, password, text):
         files={'file': ('backup.ndjson', text)}
     )
 
+    response_text = json.loads(r.text)
+    if not response_text['success'] and resolve_conflicts:
+        text =  remove_reference(text)
+        r = requests.post(
+            url,
+            auth=(user, password),
+            headers={'kbn-xsrf': 'reporting'},
+            files={'file': ('backup.ndjson', text)}
+        )
+
     print(r.status_code, r.reason, '\n', r.text)
     r.raise_for_status()  # Raises stored HTTPError, if one occurred.
+
+def remove_reference(text):
+    text = json.loads(text)
+    new_references = []
+    for ref in text['references']:
+        if not ref['id'].startswith('AXMJ'):
+            new_references.append(ref)
+    text['references'] = new_references
+    return json.dumps(text)
 
 
 if __name__ == '__main__':
@@ -74,6 +94,8 @@ if __name__ == '__main__':
     args_parser.add_argument('--password', default='', help='Kibana password')
     args_parser.add_argument('--backup-dir', help='Dir where backups will be stored')
     args_parser.add_argument('--restore-file', help='ndjson file to restore')
+    args_parser.add_argument('--resolve-conflicts', default=True,
+                             help='Resolve conflicts by removing index id reference in backup file')
     args = args_parser.parse_args()
 
     kibana_url = args.kibana_url
@@ -92,4 +114,4 @@ if __name__ == '__main__':
         else:
             text = ''.join(sys.stdin.readlines())
 
-        restore(kibana_url, args.space_id, args.user, args.password, text)
+        restore(kibana_url, args.space_id, args.user, args.password, text, args.resolve_conflicts)
