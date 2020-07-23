@@ -9,13 +9,15 @@ import argparse
 import requests
 
 # Error message from Kibana listing all possible saved objects types:
-# \"type\" must be one of [config, map, canvas-workpad, canvas-element, index-pattern, visualization, search, dashboard, url]
+# \"type\" must be one of:
+# [config, map, canvas-workpad, canvas-element, index-pattern,
+#  visualization, search, dashboard, url]
 saved_objects_types = (
     'config', 'map', 'canvas-workpad', 'canvas-element', 'index-pattern',
     'visualization', 'search', 'dashboard', 'url')
 
 
-def backup(kibana_url, space_id, user, password):
+def backup(kibana_url, space_id, user, password, backup_dir):
     """Return string with newline-delimitered json containing Kibana saved objects"""
     saved_objects = {}
     if len(space_id):
@@ -32,6 +34,11 @@ def backup(kibana_url, space_id, user, password):
         )
         r.raise_for_status()  # Raises stored HTTPError, if one occurred.
         saved_objects[obj_type] = r.text
+        with open(("%s.ndjson" % obj_type), 'a') as f:
+            f.write(r.text)
+
+    with open("backup.ndjson", 'a') as f:
+        f.write('\n'.join(saved_objects.values()))
 
     return '\n'.join(saved_objects.values())
 
@@ -65,9 +72,24 @@ if __name__ == '__main__':
                              help='Kibana space id. If not set then the default space is used.')
     args_parser.add_argument('--user', default='', help='Kibana user')
     args_parser.add_argument('--password', default='', help='Kibana password')
+    args_parser.add_argument('--backup-dir', help='Dir where backups will be stored')
+    args_parser.add_argument('--restore-file', help='ndjson file to restore')
     args = args_parser.parse_args()
 
+    kibana_url = args.kibana_url
+    if (not args.kibana_url.startswith('http') and
+        not args.kibana_url.startswith('https')):
+        kibana_url = "http://%s" % args.kibana_url
+
     if args.action == 'backup':
-        print(backup(args.kibana_url, args.space_id, args.user, args.password))
+        print(backup(kibana_url, args.space_id, args.user, args.password,
+                     args.backup_dir)
+              )
     elif args.action == 'restore':
-        restore(args.kibana_url, args.space_id, args.user, args.password, ''.join(sys.stdin.readlines()))
+        if args.restore_file:
+            with open(args.restore_file) as f:
+                text = f.read()
+        else:
+            text = ''.join(sys.stdin.readlines())
+
+        restore(kibana_url, args.space_id, args.user, args.password, text)
