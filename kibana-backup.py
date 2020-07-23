@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
+
 # Kibana documentation:
 # https://www.elastic.co/guide/en/kibana/current/saved-objects-api-export.html
 # https://www.elastic.co/guide/en/kibana/current/saved-objects-api-import.html
 
 import json
 import sys
+import time
 import argparse
 import requests
 
@@ -26,7 +28,6 @@ def backup(kibana_url, space_id, user, password, backup_dir):
     else:
         url = kibana_url + '/api/saved_objects/_export'
     for obj_type in saved_objects_types:
-        # print(obj_type)
         r = requests.post(
             url,
             auth=(user, password),
@@ -35,8 +36,9 @@ def backup(kibana_url, space_id, user, password, backup_dir):
         )
         r.raise_for_status()  # Raises stored HTTPError, if one occurred.
         saved_objects[obj_type] = r.text
-        with open(("%s.ndjson" % obj_type), 'a') as f:
-            f.write(r.text)
+        if backup_dir:
+            with open(("%s.ndjson" % obj_type), 'a') as f:
+                f.write(r.text)
 
     with open("backup.ndjson", 'a') as f:
         f.write('\n'.join(saved_objects.values()))
@@ -52,34 +54,60 @@ def restore(kibana_url, space_id, user, password, text, resolve_conflicts):
     else:
         url = kibana_url + '/api/saved_objects/_import?overwrite=true'
     print('POST ' + url)
-    r = requests.post(
-        url,
-        auth=(user, password),
-        headers={'kbn-xsrf': 'reporting'},
-        files={'file': ('backup.ndjson', text)}
-    )
+    for kib_obj in text:
+        print("Working on %s" % kib_obj)
 
-    response_text = json.loads(r.text)
-    if not response_text['success'] and resolve_conflicts:
-        text =  remove_reference(text)
-        r = requests.post(
-            url,
-            auth=(user, password),
-            headers={'kbn-xsrf': 'reporting'},
-            files={'file': ('backup.ndjson', text)}
-        )
+        if check_if_empty(kib_obj):
+            print("Spotted empty object. Continue...")
+            continue
 
-    print(r.status_code, r.reason, '\n', r.text)
-    r.raise_for_status()  # Raises stored HTTPError, if one occurred.
+        r = make_request(url, user, password, kib_obj)
+
+        if not r:
+            print("Can not import %s into Kibana" % kib_obj)
+            continue
+
+        response_text = json.loads(r.text)
+        if not response_text['success'] and resolve_conflicts:
+            text =  remove_reference(kib_obj)
+            r = make_request(url, user, password, text)
+
+        print(r.status_code, r.reason, '\n', r.text)
+        r.raise_for_status()  # Raises stored HTTPError, if one occurred.
 
 def remove_reference(text):
     text = json.loads(text)
     new_references = []
     for ref in text['references']:
-        if not ref['id'].startswith('AXMJ'):
+        if not ref['id'].startswith('AX') and len(ref['id']) != 20:
             new_references.append(ref)
     text['references'] = new_references
     return json.dumps(text)
+
+
+def make_request(url, user, password, text, retry=True):
+    r = None
+    try:
+        r = requests.post(
+            url,
+            auth=(user, password),
+            headers={'kbn-xsrf': 'reporting'},
+            files={'file': ('backup.ndjson', text)},
+            timeout=10
+        )
+    except requests.exceptions.ReadTimeout:
+        if not retry:
+            print("Importing failed. Retrying...")
+            time.sleep(10)
+            make_request(url, user, password, text)
+    return r
+
+
+def check_if_empty(text):
+    text = json.loads(text)
+#    import remote_pdb; remote_pdb.set_trace(port=1234)
+    if 'exportedCount' in text and text['exportedCount'] == 0:
+        return True
 
 
 if __name__ == '__main__':
@@ -110,7 +138,7 @@ if __name__ == '__main__':
     elif args.action == 'restore':
         if args.restore_file:
             with open(args.restore_file) as f:
-                text = f.read()
+                text = f.readlines()
         else:
             text = ''.join(sys.stdin.readlines())
 
