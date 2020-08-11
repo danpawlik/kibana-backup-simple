@@ -31,7 +31,7 @@ def manage_space(action, host, space_name, readonly, disable, user, password,
                                        "indexPatterns",
                                        "savedObjectsManagement",
                                        "monitoring"]
-                                       #"visualize", "dashboard",
+                                      # "visualize", "dashboard"]
     if disable:
         payload['disabledFeatures'] = disable
 
