@@ -44,7 +44,7 @@ def backup(kibana_url, space_id, user, password, backup_dir):
             url,
             auth=(user, password),
             headers={'Content-Type': 'application/json',
-                     'kbn-xsrf': 'reporting'},
+                     'kbn-xsrf': 'true'},
             data='{ "type": "' + obj_type + '" }'
         )
         r.raise_for_status()  # Raises stored HTTPError, if one occurred.
@@ -94,29 +94,52 @@ def restore(kibana_url, space_id, user, password, text, resolve_conflicts,
         if check_if_empty(kib_obj):
             print("Spotted empty object. Continue...")
             continue
-
+        # FIXME: Kibana returns error 406, because
+        # the object mapping has been changed
         r = make_request(url, user, password, kib_obj)
 
-        if not r:
+        if not r and not legacy:
             print("Can not import %s into Kibana" % kib_obj)
             continue
 
         response_text = json.loads(r.text)
-        if not response_text['success'] and resolve_conflicts:
-            text = remove_reference(kib_obj)
+#        if not response_text['success'] and resolve_conflicts:
+        if resolve_conflicts:
+            text = remove_reference(kib_obj, legacy)
             r = make_request(url, user, password, text)
 
         print(r.status_code, r.reason, '\n', r.text)
         r.raise_for_status()  # Raises stored HTTPError, if one occurred.
 
+def _filter_id_ref(ref):
+    if not ref['id'].startswith('AX') and len(ref['id']) != 20:
+        return ref
 
-def remove_reference(text):
+
+def remove_reference(text, legacy):
     text = json.loads(text)
     new_references = []
-    for ref in text['references']:
-        if not ref['id'].startswith('AX') and len(ref['id']) != 20:
-            new_references.append(ref)
-    text['references'] = new_references
+    # FIXME: setup mapping;
+    # FIXME: Some key in dicts in panelsJSON are not acceptable by
+    # new Kibana
+    if legacy:
+        new_obj = {}
+        new_obj['attributes'] = text['_source']
+        new_obj['id'] = text['_id']
+        new_obj['type'] = text['_type']
+        text = new_obj
+        for ref in json.loads(new_obj['attributes']['panelsJSON']):
+            if ref['id'].startswith('AX') and len(ref['id']) == 20:
+                ref.pop('id')
+                new_references.append(ref)
+        text['references'] = new_references
+        text['attributes']['panelsJSON'] = []
+    else:
+        if 'references' in text:
+            for ref in text['references']:
+                if not ref['id'].startswith('AX') and len(ref['id']) != 20:
+                    new_references.append(ref)
+            text['references'] = new_references
     return json.dumps(text)
 
 
