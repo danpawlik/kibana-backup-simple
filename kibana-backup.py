@@ -10,11 +10,13 @@
 
 import datetime
 import json
+import ndjson
 import sys
 import time
 import argparse
 import requests
 import os
+import yaml
 
 # Error message from Kibana listing all possible saved objects types:
 # \"type\" must be one of:
@@ -25,7 +27,13 @@ saved_objects_types = (
     'visualization', 'search', 'dashboard', 'url')
 
 
-def backup(kibana_url, space_id, user, password, backup_dir):
+def save_content_to_file(saved_objects, obj_type, backup_file, extension):
+    with open(backup_file, 'a') as f:
+        f.write(saved_objects[obj_type])
+
+
+def backup(kibana_url, space_id, user, password, backup_dir, insecure,
+           extension='ndjson'):
     """Return string with newline-delimitered json containing
     Kibana saved objects"""
     saved_objects = {}
@@ -43,18 +51,35 @@ def backup(kibana_url, space_id, user, password, backup_dir):
         r = requests.post(
             url,
             auth=(user, password),
-            headers={'Content-Type': 'application/json',
-                     'kbn-xsrf': 'reporting'},
-            data='{ "type": "' + obj_type + '" }'
+            headers={
+                'Content-Type': 'application/json',
+                'kbn-xsrf': 'reporting'
+            },
+            data='{ "type": "' + obj_type +
+            '","excludeExportDetails": true}',
+            verify=insecure
         )
-        r.raise_for_status()  # Raises stored HTTPError, if one occurred.
-        saved_objects[obj_type] = r.text
 
-        backup_file = "%s/%s.ndjson" % (backup_dir, obj_type)
+        if r.status_code == 400:
+            # Print warning on missing object, but continue
+            print("Can not backup object %s" % obj_type)
+            continue
+        else:
+            r.raise_for_status()  # Raises stored HTTPError
+
+        if not r.text:
+            continue
+
+        if extension in ['yaml', 'yml']:
+            saved_objects[obj_type] = yaml.dump(ndjson.loads(r.text))
+        else:
+            saved_objects[obj_type] = r.text
+
+        backup_file = "%s/%s.%s" % (backup_dir, obj_type, extension)
         if os.path.exists(backup_file):
             backup_file = "%s-%s" % (backup_file, b_time)
-        with open(backup_file, 'a') as f:
-            f.write(r.text)
+
+        save_content_to_file(saved_objects, obj_type, backup_file, extension)
 
     backup_file = "%s/backup.ndjson" % backup_dir
     if os.path.exists(backup_file):
@@ -66,7 +91,7 @@ def backup(kibana_url, space_id, user, password, backup_dir):
 
 
 def restore(kibana_url, space_id, user, password, text, resolve_conflicts,
-            legacy=None):
+            insecure, extension):
     """Restore given newline-delimitered json containing
     saved objects to Kibana"""
 
@@ -76,26 +101,14 @@ def restore(kibana_url, space_id, user, password, text, resolve_conflicts,
     else:
         url = kibana_url + '/api/saved_objects/_import?overwrite=true'
     print('POST ' + url)
-
-    if legacy:
-        parsed_text = ""
-        for line in text:
-            new_text = line.replace("\n", "")
-            parsed_text = "%s %s" % (parsed_text, new_text.replace("'", ""))
-
-        text = json.loads(parsed_text)
-
     for kib_obj in text:
         print("Working on %s" % kib_obj)
-
-        if isinstance(kib_obj, dict):
-            kib_obj = json.dumps(kib_obj)
 
         if check_if_empty(kib_obj):
             print("Spotted empty object. Continue...")
             continue
 
-        r = make_request(url, user, password, kib_obj)
+        r = make_request(url, user, password, kib_obj, insecure)
 
         if not r:
             print("Can not import %s into Kibana" % kib_obj)
@@ -104,7 +117,7 @@ def restore(kibana_url, space_id, user, password, text, resolve_conflicts,
         response_text = json.loads(r.text)
         if not response_text['success'] and resolve_conflicts:
             text = remove_reference(kib_obj)
-            r = make_request(url, user, password, text)
+            r = make_request(url, user, password, text, insecure)
 
         print(r.status_code, r.reason, '\n', r.text)
         r.raise_for_status()  # Raises stored HTTPError, if one occurred.
@@ -120,7 +133,7 @@ def remove_reference(text):
     return json.dumps(text)
 
 
-def make_request(url, user, password, text, retry=True):
+def make_request(url, user, password, text, insecure=False, retry=True):
     r = None
     try:
         r = requests.post(
@@ -128,13 +141,19 @@ def make_request(url, user, password, text, retry=True):
             auth=(user, password),
             headers={'kbn-xsrf': 'reporting'},
             files={'file': ('backup.ndjson', text)},
-            timeout=10
+            timeout=10,
+            verify=insecure
         )
     except requests.exceptions.ReadTimeout:
         if not retry:
             print("Importing failed. Retrying...")
             time.sleep(10)
-            make_request(url, user, password, text)
+            make_request(url, user, password, text, insecure)
+
+    if "Please enter your credentials" in r.text:
+        print("Please provide correct username and password")
+        sys.exit(1)
+
     return r
 
 
@@ -162,9 +181,11 @@ if __name__ == '__main__':
     args_parser.add_argument('--resolve-conflicts', default=True,
                              help='Resolve conflicts by removing index '
                                   'id reference in backup file')
-    args_parser.add_argument('--legacy', action='store_true',
-                             help='Restore backup file from Kibana'
-                             ' <= 5.6 . Only works with restore option')
+    args_parser.add_argument('--insecure', action='store_true',
+                             help='Use that option to ignore if SSL cert '
+                                  'has been verified by root CA')
+    args_parser.add_argument('--extension', default='ndjson',
+                             help='Backup extension type')
     args = args_parser.parse_args()
 
     kibana_url = args.kibana_url
@@ -173,13 +194,8 @@ if __name__ == '__main__':
         kibana_url = "http://%s" % args.kibana_url
 
     if args.action == 'backup':
-
-        if args.legacy:
-            print("Can not use legacy option with backup")
-            sys.exit(1)
-
         print(backup(kibana_url, args.space_id, args.user, args.password,
-                     args.backup_dir)
+                     args.backup_dir, args.insecure, args.extension)
               )
     elif args.action == 'restore':
         if args.restore_file:
@@ -189,4 +205,4 @@ if __name__ == '__main__':
             text = ''.join(sys.stdin.readlines())
 
         restore(kibana_url, args.space_id, args.user, args.password,
-                text, args.resolve_conflicts, args.legacy)
+                text, args.resolve_conflicts, args.insecure, args.extension)
