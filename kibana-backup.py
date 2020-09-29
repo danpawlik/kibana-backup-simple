@@ -26,10 +26,19 @@ saved_objects_types = (
     'config', 'map', 'canvas-workpad', 'canvas-element', 'index-pattern',
     'visualization', 'search', 'dashboard', 'url')
 
+to_remove_keys = ['updated_at', 'version', 'migrationVersion']
 
-def save_content_to_file(saved_objects, obj_type, backup_file, extension):
+
+def convert_to_yaml(text):
+    text = remove_reference(text)
+    return yaml.dump(json.loads(text))
+
+
+def save_content_to_file(text, backup_file, extension):
+    if extension in ['yaml', 'yml']:
+        text = convert_to_yaml(text)
     with open(backup_file, 'a') as f:
-        f.write(saved_objects[obj_type])
+        f.write(text)
 
 
 def backup(kibana_url, space_id, user, password, backup_dir, insecure,
@@ -48,6 +57,7 @@ def backup(kibana_url, space_id, user, password, backup_dir, insecure,
     else:
         url = kibana_url + '/api/saved_objects/_export'
     for obj_type in saved_objects_types:
+        print("Working on %s" % obj_type)
         r = requests.post(
             url,
             auth=(user, password),
@@ -65,29 +75,23 @@ def backup(kibana_url, space_id, user, password, backup_dir, insecure,
             print("Can not backup object %s" % obj_type)
             continue
         else:
-            r.raise_for_status()  # Raises stored HTTPError
+            r.raise_for_status()
 
         if not r.text:
             continue
-
-        if extension in ['yaml', 'yml']:
-            saved_objects[obj_type] = yaml.dump(ndjson.loads(r.text))
-        else:
-            saved_objects[obj_type] = r.text
 
         backup_file = "%s/%s.%s" % (backup_dir, obj_type, extension)
         if os.path.exists(backup_file):
             backup_file = "%s-%s" % (backup_file, b_time)
 
-        save_content_to_file(saved_objects, obj_type, backup_file, extension)
+        saved_objects[obj_type] = r.text
+        save_content_to_file(r.text, backup_file, extension)
 
     backup_file = "%s/backup.ndjson" % backup_dir
     if os.path.exists(backup_file):
         backup_file = "%s-%s" % (backup_file, b_time)
     with open(backup_file, 'a') as f:
         f.write('\n'.join(saved_objects.values()))
-
-    return '\n'.join(saved_objects.values())
 
 
 def restore(kibana_url, space_id, user, password, text, resolve_conflicts,
@@ -100,9 +104,14 @@ def restore(kibana_url, space_id, user, password, text, resolve_conflicts,
                '/api/saved_objects/_import?overwrite=true')
     else:
         url = kibana_url + '/api/saved_objects/_import?overwrite=true'
-    print('POST ' + url)
+
+    if not isinstance(text, list):
+        text = [text]
+
     for kib_obj in text:
         print("Working on %s" % kib_obj)
+
+        kib_obj = json.dumps(kib_obj)
 
         if check_if_empty(kib_obj):
             print("Spotted empty object. Continue...")
@@ -124,13 +133,28 @@ def restore(kibana_url, space_id, user, password, text, resolve_conflicts,
 
 
 def remove_reference(text):
-    text = json.loads(text)
+    new_text = []
     new_references = []
-    for ref in text['references']:
-        if not ref['id'].startswith('AX') and len(ref['id']) != 20:
-            new_references.append(ref)
-    text['references'] = new_references
-    return json.dumps(text)
+    try:
+        text = json.loads(text)
+        for ref in text['references']:
+            if not ref['id'].startswith('AX') and len(ref['id']) != 20:
+                new_references.append(remove_obj_keys(ref))
+        text['references'] = new_references
+    except json.decoder.JSONDecodeError:
+        text = ndjson.loads(text)
+        for ref in text:
+            if (not ref['references'][0]['id'].startswith('AX')
+                    and len(ref['references'][0]['id']) != 20):
+                new_text.append(remove_obj_keys(ref))
+
+    return json.dumps(new_text) if new_text else json.dumps(text)
+
+
+def remove_obj_keys(ref):
+    for k in to_remove_keys:
+        ref.pop(k, None)
+    return ref
 
 
 def make_request(url, user, password, text, insecure=False, retry=True):
@@ -197,12 +221,20 @@ if __name__ == '__main__':
         print(backup(kibana_url, args.space_id, args.user, args.password,
                      args.backup_dir, args.insecure, args.extension)
               )
+
     elif args.action == 'restore':
         if args.restore_file:
-            with open(args.restore_file) as f:
-                text = f.readlines()
+            if (args.restore_file.endswith('yml')
+                    or args.restore_file.endswith('yaml')):
+                extension = 'yaml'
+                with open(args.restore_file) as f:
+                    text = yaml.safe_load(f)
+            else:
+                with open(args.restore_file) as f:
+                    text = f.readlines()
+            extension = 'json'
         else:
             text = ''.join(sys.stdin.readlines())
 
         restore(kibana_url, args.space_id, args.user, args.password,
-                text, args.resolve_conflicts, args.insecure, args.extension)
+                text, args.resolve_conflicts, args.insecure, extension)
