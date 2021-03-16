@@ -46,6 +46,8 @@ def get_arguments():
     args_parser.add_argument('--backup-dir',
                              help='Dir where backups will be stored')
     args_parser.add_argument('--file', help='File to restore or convert')
+    args_parser.add_argument('--restore-file',
+                             help='DEPRECATED: File to restore or convert')
     args_parser.add_argument('--resolve-conflicts',
                              default=True,
                              help='Resolve conflicts by removing index '
@@ -63,12 +65,23 @@ def get_arguments():
 def convert_to_yaml(text, remove_references):
     if remove_references:
         text = remove_reference(text)
-    return yaml.dump(json.loads(text))
+    try:
+        if not isinstance(text, list):
+            return yaml.dump([json.loads(text)])
+        else:
+            text = [json.loads(txt.replace('\n','')) for txt in text]
+            return yaml.dump(text)
+    except TypeError:
+        raise("Bad malformed file")
 
 
 def save_content_to_file(text, backup_file, extension, remove_references=True):
     if extension in ['yaml', 'yml']:
         text = convert_to_yaml(text, remove_references)
+    if isinstance(text, dict):
+        text = str(text)
+    if extension in ['json', 'ndjson'] and isinstance(text, list):
+        text = " ".join(json.dumps(txt) + '\n' for txt in text)
     with open(backup_file, 'a') as f:
         f.write(text)
 
@@ -91,12 +104,20 @@ def remove_reference(text):
     try:
         text = json.loads(text)
         for ref in text['references']:
-            if not ref.get('id').startswith('AX') and len(ref.get('id')) != 20:
+            if (not ref.get('id').startswith('AX')
+                    and len(ref.get('id')) != 20):
                 new_references.append(remove_obj_keys(ref))
         text['references'] = new_references
     except json.decoder.JSONDecodeError:
-        raise ("Can not remove reference! Bad malformed ndjson file")
-        sys.exit(1)
+        for text_obj in text.rsplit('\n'):
+            n_text = json.loads(text_obj)
+            for ref in n_text['references']:
+                if (not ref.get('id').startswith('AX')
+                        and len(ref.get('id')) != 20):
+                    new_references.append(remove_obj_keys(ref))
+            n_text['references'] = new_references
+
+        text = n_text
 
     return json.dumps(new_text) if new_text else json.dumps(text)
 
@@ -123,24 +144,17 @@ def make_request(url, user, password, text, insecure=False, retry=True):
     return r
 
 
-def _get_file_content(backup_file, extension=None):
-    if (args.file.endswith('yml') or args.file.endswith('yaml')):
-        extension = 'yaml'
+def _get_file_content(backup_file):
+    if (backup_file.endswith('yml') or backup_file.endswith('yaml')):
         with open(args.file) as f:
             text = yaml.safe_load(f)
     else:
         with open(args.file) as f:
             text = f.readlines()
-        extension = 'json'
-    return text, extension
+    return text
 
 
-def backup(kibana_url,
-           space_id,
-           user,
-           password,
-           backup_dir,
-           insecure,
+def backup(kibana_url, space_id, user, password, backup_dir, insecure,
            extension='ndjson'):
     """Return string with newline-delimitered json containing
     Kibana saved objects"""
@@ -184,15 +198,28 @@ def backup(kibana_url,
         saved_objects[obj_type] = r.text
         save_content_to_file(r.text, backup_file, extension)
 
-    backup_file = "%s/backup.ndjson" % backup_dir
+    backup_file = "%s/backup.%s" % (backup_dir, extension)
+    original_backup_file = "%s/backup-original.%s" % (backup_dir, 'ndjson')
     if os.path.exists(backup_file):
         backup_file = "%s-%s" % (backup_file, b_time)
-    with open(backup_file, 'a') as f:
+
+    for kib_obj in saved_objects.values():
+        for text_obj in kib_obj.rsplit('\n'):
+            if extension in ['yaml', 'yml']:
+                n_text = json.dumps(json.loads(text_obj))
+            else:
+                n_text = "%s\n" % text_obj
+
+            save_content_to_file(n_text, backup_file, extension, False)
+
+    print("Original ndjson with all content available in file"
+          "%s" % original_backup_file)
+    with open(original_backup_file, 'a') as f:
         f.write('\n'.join(saved_objects.values()))
 
 
 def restore(kibana_url, space_id, user, password, text, resolve_conflicts,
-            insecure, extension):
+            insecure):
     """Restore given newline-delimitered json containing
     saved objects to Kibana"""
 
@@ -225,7 +252,7 @@ def restore(kibana_url, space_id, user, password, text, resolve_conflicts,
 
         try:
             response_error = json.loads(r.text)
-            if response_error['errors']:
+            if response_error.get('errors'):
                 print("\n\nSome problem on restoring %s: %s\n\n" %
                       (kib_obj, response_error['errors']))
         except Exception as e:
@@ -247,13 +274,17 @@ def restore(kibana_url, space_id, user, password, text, resolve_conflicts,
 
 def convert(text, extension, convert_file):
     convert_file = "%s-converted.%s" % (convert_file, extension)
-    for kib_obj in text:
-        save_content_to_file(kib_obj, convert_file, extension, False)
+    save_content_to_file(text, convert_file, extension, False)
 
 
 if __name__ == '__main__':
     args = get_arguments()
     kibana_url = args.kibana_url
+
+    if args.file and args.restore_file:
+        print("Can not set both params: file and restore-file. Exit")
+        sys.exit(1)
+
     if (not args.kibana_url.startswith('http')
             and not args.kibana_url.startswith('https')):
         kibana_url = "http://%s" % args.kibana_url
@@ -263,16 +294,17 @@ if __name__ == '__main__':
                args.backup_dir, args.insecure, args.extension)
 
     elif args.action == 'restore':
-        if args.file:
-            text, extension = _get_file_content(args.file, args.extension)
+        restore_file = args.file if args.file else args.restore_file
+        if restore_file:
+            text = _get_file_content(args.file)
         else:
             text = ''.join(sys.stdin.readlines())
 
         restore(kibana_url, args.space_id, args.user, args.password, text,
-                args.resolve_conflicts, args.insecure, extension)
+                args.resolve_conflicts, args.insecure)
     elif args.action == 'convert':
         if args.file:
-            text, extension = _get_file_content(args.file, args.extension)
+            text = _get_file_content(args.file)
         else:
             text = ''.join(sys.stdin.readlines())
 
