@@ -18,6 +18,8 @@ Available arguments:
 * `--file` - file that will be converted or restored
 * `--backup-dir` - backup location
 * `--extension` - backup extension. Available `yml` or `yaml` or `json`. Defaults to `json`
+* `--resolve-conflicts` - removes references if it get an exception on restoring the backup object. Defaults to `true`.
+* `--insecure` - do not verify SSL CA authority
 
 *Note:* To use the default space you should not set `--space-id` parameter. Setting it to the default space id: `default` does not work.
 

@@ -10,7 +10,6 @@
 
 import datetime
 import json
-import ndjson
 import sys
 import time
 import argparse
@@ -96,11 +95,8 @@ def remove_reference(text):
                 new_references.append(remove_obj_keys(ref))
         text['references'] = new_references
     except json.decoder.JSONDecodeError:
-        text = ndjson.loads(text)
-        for ref in text:
-            if (not ref['references'][0].get('id').startswith('AX')
-                    and len(ref['references'][0].get('id')) != 20):
-                new_text.append(remove_obj_keys(ref))
+        raise ("Can not remove reference! Bad malformed ndjson file")
+        sys.exit(1)
 
     return json.dumps(new_text) if new_text else json.dumps(text)
 
@@ -128,8 +124,7 @@ def make_request(url, user, password, text, insecure=False, retry=True):
 
 
 def _get_file_content(backup_file, extension=None):
-    if (args.file.endswith('yml')
-            or args.file.endswith('yaml')):
+    if (args.file.endswith('yml') or args.file.endswith('yaml')):
         extension = 'yaml'
         with open(args.file) as f:
             text = yaml.safe_load(f)
@@ -140,7 +135,12 @@ def _get_file_content(backup_file, extension=None):
     return text, extension
 
 
-def backup(kibana_url, space_id, user, password, backup_dir, insecure,
+def backup(kibana_url,
+           space_id,
+           user,
+           password,
+           backup_dir,
+           insecure,
            extension='ndjson'):
     """Return string with newline-delimitered json containing
     Kibana saved objects"""
@@ -229,7 +229,8 @@ def restore(kibana_url, space_id, user, password, text, resolve_conflicts,
                 print("\n\nSome problem on restoring %s: %s\n\n" %
                       (kib_obj, response_error['errors']))
         except Exception as e:
-            print("Kibana restore requests objects does not look correct")
+            print("Kibana restore requests objects does not look correct:"
+                  " %s" % e)
 
         if not r:
             print("Can not import %s into Kibana" % kib_obj)
@@ -263,8 +264,7 @@ if __name__ == '__main__':
 
     elif args.action == 'restore':
         if args.file:
-            text, extension = _get_file_content(args.file,
-                                                args.extension)
+            text, extension = _get_file_content(args.file, args.extension)
         else:
             text = ''.join(sys.stdin.readlines())
 
@@ -272,8 +272,7 @@ if __name__ == '__main__':
                 args.resolve_conflicts, args.insecure, extension)
     elif args.action == 'convert':
         if args.file:
-            text, extension = _get_file_content(args.file,
-                                                args.extension)
+            text, extension = _get_file_content(args.file, args.extension)
         else:
             text = ''.join(sys.stdin.readlines())
 
