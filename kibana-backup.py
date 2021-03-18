@@ -65,25 +65,30 @@ def get_arguments():
 def convert_to_yaml(text, remove_references):
     if remove_references:
         text = remove_reference(text)
-    try:
-        if not isinstance(text, list):
-            return yaml.dump([json.loads(text)])
-        else:
-            text = [json.loads(txt.replace('\n','')) for txt in text]
-            return yaml.dump(text)
-    except TypeError:
-        raise("Bad malformed file")
+    return yaml.dump(text)
 
 
 def save_content_to_file(text, backup_file, extension, remove_references=True):
-    if extension in ['yaml', 'yml']:
-        text = convert_to_yaml(text, remove_references)
     if isinstance(text, dict):
         text = str(text)
-    if extension in ['json', 'ndjson'] and isinstance(text, list):
+    if extension in ['yaml', 'yml']:
+        text = convert_to_yaml(text, remove_references)
+    elif extension in ['json', 'ndjson'] and isinstance(text, list):
         text = " ".join(json.dumps(txt) + '\n' for txt in text)
     with open(backup_file, 'a') as f:
         f.write(text)
+
+
+def parse_kibana_output(text):
+    new_text = []
+    new_references = []
+    try:
+        text = [json.loads(text)]
+    except json.decoder.JSONDecodeError:
+        for text_obj in text.rsplit('\n'):
+            n_text = json.loads(text_obj)
+            new_text.append(n_text)
+    return new_text if new_text else text
 
 
 def check_if_empty(text):
@@ -101,25 +106,14 @@ def remove_obj_keys(ref):
 def remove_reference(text):
     new_text = []
     new_references = []
-    try:
-        text = json.loads(text)
-        for ref in text['references']:
+    for text_obj in text:
+        for ref in text_obj['references']:
             if (not ref.get('id').startswith('AX')
                     and len(ref.get('id')) != 20):
                 new_references.append(remove_obj_keys(ref))
-        text['references'] = new_references
-    except json.decoder.JSONDecodeError:
-        for text_obj in text.rsplit('\n'):
-            n_text = json.loads(text_obj)
-            for ref in n_text['references']:
-                if (not ref.get('id').startswith('AX')
-                        and len(ref.get('id')) != 20):
-                    new_references.append(remove_obj_keys(ref))
-            n_text['references'] = new_references
-
-        text = n_text
-
-    return json.dumps(new_text) if new_text else json.dumps(text)
+            text_obj['references'] = new_references
+            new_text.append(text_obj)
+    return new_text if new_text else text
 
 
 def make_request(url, user, password, text, insecure=False, retry=True):
@@ -195,27 +189,16 @@ def backup(kibana_url, space_id, user, password, backup_dir, insecure,
         if os.path.exists(backup_file):
             backup_file = "%s-%s" % (backup_file, b_time)
 
-        saved_objects[obj_type] = r.text
-        save_content_to_file(r.text, backup_file, extension)
+        text = parse_kibana_output(r.text)
+        saved_objects[obj_type] = text
+        save_content_to_file(text, backup_file, extension)
 
     backup_file = "%s/backup.%s" % (backup_dir, extension)
-    original_backup_file = "%s/backup-original.%s" % (backup_dir, 'ndjson')
     if os.path.exists(backup_file):
         backup_file = "%s-%s" % (backup_file, b_time)
 
     for kib_obj in saved_objects.values():
-        for text_obj in kib_obj.rsplit('\n'):
-            if extension in ['yaml', 'yml']:
-                n_text = json.dumps(json.loads(text_obj))
-            else:
-                n_text = "%s\n" % text_obj
-
-            save_content_to_file(n_text, backup_file, extension, False)
-
-    print("Original ndjson with all content available in file"
-          "%s" % original_backup_file)
-    with open(original_backup_file, 'a') as f:
-        f.write('\n'.join(saved_objects.values()))
+        save_content_to_file(kib_obj, backup_file, extension, False)
 
 
 def restore(kibana_url, space_id, user, password, text, resolve_conflicts,
